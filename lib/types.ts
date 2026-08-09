@@ -40,6 +40,20 @@ export type Feedback = {
   next: string[];
 };
 
+export type EvaluationDimensions = {
+  technicalAccuracy: number;
+  technicalSpecificity: number;
+  reasoning: number;
+  communication: number;
+  productionAwareness: number;
+};
+
+export type EvaluationSummary = {
+  overallScore: number;
+  dimensions: EvaluationDimensions;
+  engine: "gemini" | "deterministic-fallback" | "hybrid";
+};
+
 export type InterviewMeta = {
   questionNumber: number;
   day: number;
@@ -52,6 +66,13 @@ export type InterviewApiResponse = {
   reply: string;
   done: boolean;
   feedback?: Feedback;
+  evaluation?: EvaluationSummary;
+  meta?: InterviewMeta;
+};
+
+export type InterviewRecoveryMessage = {
+  role: "agent" | "user";
+  content: string;
   meta?: InterviewMeta;
 };
 

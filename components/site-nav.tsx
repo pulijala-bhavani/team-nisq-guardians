@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 
@@ -33,7 +34,7 @@ export function SiteNav() {
       <nav className="site-nav section-shell" aria-label="Primary navigation">
         <Link href="/" className="brand" aria-label="AB Talks Interview Agent home">
           <span className="brand-mark">AB</span>
-          <span><img className="brand-wordmark-img" src="/abtalks-wordmark.png" alt="AB Talks" width="92" height="24" loading="eager" /><small>INTERVIEW AGENT</small></span>
+          <span><Image className="brand-wordmark-img" src="/abtalks-wordmark.png" alt="AB Talks" width={92} height={24} priority /><small>INTERVIEW AGENT</small></span>
         </Link>
         <button className="mobile-menu" onClick={() => setOpen(!open)} aria-label="Toggle navigation" aria-expanded={open}>{open ? "×" : "☰"}</button>
         <div className={`nav-links ${open ? "open" : ""}`}>

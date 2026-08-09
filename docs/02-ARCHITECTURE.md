@@ -2,19 +2,26 @@
 
 ## Overview
 
-The project is a self-contained Next.js application. UI routes, the interview API, curriculum data, and candidate data live in one deployable repository.
+ABTalks Interview Agent is a self-contained Next.js application with a hybrid interview architecture:
+
+- a deterministic controller owns eligibility, coverage, question count, validation, recovery, and fallback behaviour;
+- Gemini 2.5 Flash performs semantic answer assessment, adaptive question generation, and evidence-grounded feedback through strict JSON schemas;
+- Netlify Blobs provides strongly consistent active-session storage on the deployed Netlify site;
+- an in-memory cache reduces repeated durable reads; and
+- the bundled browser can reconstruct a missing session from its local transcript.
 
 ```mermaid
 flowchart TD
     A[Candidate selection] --> B[POST /api/interview]
-    B --> C[Session planner]
-    C --> D[Curriculum and candidate data]
-    B --> E[Interview room]
-    E -->|sessionId and answer| B
-    B --> F[Adaptive question generator]
-    F --> E
-    B -->|done true| G[Structured feedback]
-    G --> H[Feedback report]
+    B --> C[Deterministic controller]
+    C --> D[Candidate and curriculum data]
+    C --> E[Gemini structured output]
+    E -->|valid result| C
+    E -->|timeout or invalid result| F[Deterministic fallback]
+    C --> G[Durable session store]
+    C --> H[Interview room]
+    H -->|answer and recovery history| B
+    C -->|answer 8| I[Evidence-grounded feedback]
 ```
 
 ## Application layers
@@ -24,85 +31,103 @@ flowchart TD
 - `app/page.tsx`: product landing page
 - `app/setup/page.tsx`: server wrapper for candidate data
 - `components/setup-client.tsx`: candidate search, selection, and session start
-- `components/interview-room.tsx`: conversation, timer, progress, and answer submission
-- `components/report-view.tsx`: feedback visualization
-- `components/site-nav.tsx`: global navigation and theme preference
+- `components/interview-room.tsx`: transcript, progress, recovery history, and answer submission
+- `components/report-view.tsx`: structured feedback and grounded readiness score
+- `components/site-nav.tsx`: navigation and theme preference
 
 ### API layer
 
 `app/api/interview/route.ts` implements the required `POST /api/interview` contract.
 
-Responsibilities:
+It is responsible for:
 
-- Validate request JSON.
-- Start a session from a supplied candidate.
-- Select relevant completed missions.
-- Prioritize mission diversity and higher-attempt concepts.
-- Maintain question number, covered days, and evaluations.
-- Generate answer-dependent follow-ups.
-- Finish only after eight answers.
-- Return structured feedback.
+- bounded request-body parsing;
+- deep candidate and curriculum-day validation;
+- start-versus-turn request discrimination;
+- per-IP and per-session rate limiting;
+- duplicate-turn protection;
+- memory, durable, and client-assisted session recovery;
+- orchestration of Gemini and deterministic fallback paths;
+- completion after exactly eight answers; and
+- contract-compatible JSON errors.
 
-### Data layer
+### Interview-controller layer
 
-- `data/curriculum.json`
-- `data/candidates.json`
-- `data/technical-spec.md`
+`lib/interview-engine.ts` is authoritative for interview policy.
 
-The current MVP does not mutate these files.
+It:
 
-### Client continuity
+1. accepts only explicit passed missions mapped to real curriculum days;
+2. requires at least four eligible completed days;
+3. prioritizes higher-attempt missions while preferring module diversity;
+4. guarantees eight questions and four-day coverage;
+5. forces an uncovered day when remaining question slots make it necessary;
+6. branches toward clarification for weak or evasive responses;
+7. provides richer deterministic assessment when Gemini is unavailable;
+8. aggregates assessment dimensions into a defensible readiness score; and
+9. rebuilds state from client history without asking about skipped topics.
 
-The browser stores the active session transcript and final report in `localStorage`:
+### Semantic-interviewer layer
 
-- `abtalks-interview-session`
-- `abtalks-final-report`
-- `abtalks-report-history`
-- `abtalks-theme`
+`lib/gemini-interviewer.ts` calls Gemini only from the server.
 
-This storage supports refresh-safe UI continuity on the same device. The API remains authoritative for active interview progression.
+Each turn sends:
 
-## Interview-planning strategy
+- the candidate's role, experience, and synthetic learning signals;
+- only the selected completed curriculum days, objectives, and tools;
+- the compact interview transcript;
+- prior assessment verdicts and gaps; and
+- the current answer as explicitly untrusted quoted evidence.
 
-1. Filter candidate missions to completed missions.
-2. Sort by attempt count to identify concepts that may need deeper probing.
-3. Select different curriculum modules before selecting additional days from the same module.
-4. Build an eight-question sequence across six curriculum days when possible.
-5. Use questions 2, 4, and 6 as answer-dependent follow-ups.
-6. Evaluate response specificity and curriculum vocabulary.
-7. Aggregate observations into structured feedback.
+Gemini returns structured JSON validated by the application. It independently scores:
+
+- technical accuracy;
+- technical specificity;
+- reasoning;
+- communication; and
+- production awareness.
+
+The model also selects an allowed next curriculum day and one interview mode: follow-up, clarification, challenge, new topic, or synthesis. The deterministic controller rejects disallowed days and remains authoritative over completion and coverage.
+
+If the key is missing, the model times out, a quota is exceeded, the response is invalid, or validation fails, the same request completes through the deterministic fallback.
 
 ## Session model
 
-An active server session contains:
+An active session contains:
 
 ```ts
-type Session = {
+type InterviewSession = {
   candidate: Candidate;
   plan: CurriculumDay[];
   questionNumber: number;
   daysCovered: number[];
-  evaluations: Evaluation[];
+  records: InterviewRecord[];
   lastQuestion: string;
+  currentDay: number;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
 };
 ```
 
-The session is addressed only through the caller-provided `sessionId`.
+Sessions expire after two hours and are deleted immediately after final feedback is returned.
 
-## Deployment model
+## Continuity and deployment
 
-The repository supports standard Next.js deployment:
+### Netlify
 
-- Vercel through automatic framework detection
-- Netlify through `netlify.toml` and the official Next.js adapter
-- Any Node.js platform capable of running `next start`
+Netlify Blobs stores active sessions in a site-scoped store named `abtalks-interview-sessions`. Strong reads are used so a request routed to another function instance can recover the latest session. Netlify provisions the storage context for deployed functions.
 
-## Production evolution
+### Local development and other platforms
 
-For a larger production system:
+The application uses the in-memory cache when Netlify Blobs is unavailable. The bundled client additionally sends its candidate, answer list, and sanitized transcript as optional recovery context. This permits deterministic reconstruction after a cold instance while preserving the organiser's minimum `sessionId + message` request.
 
-- Replace the in-memory session map with Redis, Postgres, or another low-latency session store.
-- Replace or supplement deterministic question generation with an LLM provider.
-- Validate LLM output against typed response schemas.
-- Add tracing, rate limiting, evaluation datasets, and prompt-version tracking.
-- Keep the public API contract unchanged.
+For a large multi-platform production system, the same storage functions can be replaced with Redis or Postgres without changing the public API.
+
+## Privacy boundary
+
+- Gemini credentials remain server-side.
+- Candidate answers are sent to Gemini only when semantic mode is enabled.
+- Candidate text is treated as untrusted and cannot override the interviewer instructions.
+- Completed reports are stored only in the current browser.
+- No authentication, real accounts, or long-term server-side report history is implemented.

@@ -1,171 +1,402 @@
+import { getStore } from "@netlify/blobs";
 import { NextResponse } from "next/server";
-import curriculumData from "@/data/curriculum.json";
-import type { Candidate, CurriculumDay, Feedback, InterviewApiResponse } from "@/lib/types";
+import type { Candidate, InterviewApiResponse, InterviewRecoveryMessage } from "@/lib/types";
+import {
+  SESSION_TTL_MS,
+  TOTAL_QUESTIONS,
+  chooseFallbackNextDay,
+  createSession,
+  dayByNumber,
+  deterministicAssessment,
+  deterministicFeedback,
+  deterministicQuestion,
+  moduleForDay,
+  rebuildSessionFromAnswers,
+  rebuildSessionFromHistory,
+  sanitizeNextDay,
+  summarizeEvaluation,
+  type InterviewSession,
+} from "@/lib/interview-engine";
+import { generateSemanticOpening, generateSemanticTurn } from "@/lib/gemini-interviewer";
 
-type Evaluation = { strength?: string; gap?: string; length: number; keywords: number };
-type Session = {
-  candidate: Candidate;
-  plan: CurriculumDay[];
-  questionNumber: number;
-  daysCovered: number[];
-  evaluations: Evaluation[];
-  lastQuestion: string;
+type RequestBody = {
+  sessionId?: unknown;
+  candidate?: unknown;
+  message?: unknown;
+  answers?: unknown;
+  history?: unknown;
 };
 
-const days = curriculumData.days as CurriculumDay[];
-const dayByNumber = new Map(days.map((day) => [day.day, day]));
-const globalStore = globalThis as typeof globalThis & { __abtalksSessions?: Map<string, Session> };
-const sessions = globalStore.__abtalksSessions ?? new Map<string, Session>();
+type RateBucket = { count: number; resetAt: number };
+
+const globalStore = globalThis as typeof globalThis & {
+  __abtalksSessions?: Map<string, InterviewSession>;
+  __abtalksRateBuckets?: Map<string, RateBucket>;
+  __abtalksProcessing?: Set<string>;
+};
+const sessions = globalStore.__abtalksSessions ?? new Map<string, InterviewSession>();
+const rateBuckets = globalStore.__abtalksRateBuckets ?? new Map<string, RateBucket>();
+const processing = globalStore.__abtalksProcessing ?? new Set<string>();
 globalStore.__abtalksSessions = sessions;
+globalStore.__abtalksRateBuckets = rateBuckets;
+globalStore.__abtalksProcessing = processing;
 
-function moduleForDay(day: number) {
-  const curriculumModule = curriculumData.modules.find((item) => day >= item.days[0] && day <= item.days[1]);
-  return curriculumModule?.title ?? "AI Engineering";
+const MAX_BODY_BYTES = 120_000;
+const MAX_MESSAGE_CHARACTERS = 8_000;
+const SESSION_STORE_NAME = "abtalks-interview-sessions";
+
+function jsonError(reply: string, status = 400, headers?: HeadersInit) {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("Cache-Control", "no-store");
+  responseHeaders.set("X-Content-Type-Options", "nosniff");
+  return NextResponse.json({ reply, done: false }, { status, headers: responseHeaders });
 }
 
-function buildPlan(candidate: Candidate): CurriculumDay[] {
-  const passed = candidate.missions
-    .filter((mission) => mission.passed)
-    .sort((a,b) => (b.attempts ?? 1) - (a.attempts ?? 1));
-  const picked: CurriculumDay[] = [];
-  const seenModules = new Set<string>();
+function jsonResponse(body: InterviewApiResponse) {
+  return NextResponse.json(body, {
+    headers: {
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
 
-  for (const mission of passed) {
-    const day = dayByNumber.get(mission.day);
-    if (!day) continue;
-    const curriculumModule = moduleForDay(day.day);
-    if (!seenModules.has(curriculumModule)) {
-      picked.push(day);
-      seenModules.add(curriculumModule);
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isShortString(value: unknown, max = 300): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max;
+}
+
+function isBoundedNumber(value: unknown, min: number, max: number) {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+
+function validateCandidate(value: unknown): value is Candidate {
+  if (!isObject(value) || !isObject(value.member) || !isObject(value.signals) || !Array.isArray(value.missions)) {
+    return false;
+  }
+  const { member, signals, missions } = value;
+  if (
+    !isShortString(member.id, 100) ||
+    !isShortString(member.name, 120) ||
+    !isShortString(member.jobRole, 160) ||
+    !isShortString(member.education, 200) ||
+    !isShortString(member.status, 60) ||
+    !isBoundedNumber(member.yearsExperience, 0, 80) ||
+    !isBoundedNumber(signals.commitDays, 0, 31) ||
+    !isBoundedNumber(signals.missionsCompleted, 0, 31) ||
+    !isBoundedNumber(signals.missionsFirstTry, 0, 31) ||
+    missions.length > 31
+  ) {
+    return false;
+  }
+
+  const seenDays = new Set<number>();
+  for (const mission of missions) {
+    if (!isObject(mission) || !Number.isInteger(mission.day) || !dayByNumber.has(mission.day as number)) return false;
+    if (seenDays.has(mission.day as number) || !isShortString(mission.title, 220)) return false;
+    seenDays.add(mission.day as number);
+    if (mission.passed !== undefined && typeof mission.passed !== "boolean") return false;
+    if (mission.skipped !== undefined && typeof mission.skipped !== "boolean") return false;
+    if (mission.attempts !== undefined && !isBoundedNumber(mission.attempts, 1, 50)) return false;
+    if (mission.passed === true && mission.skipped === true) return false;
+  }
+
+  return true;
+}
+
+function parseSessionId(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const sessionId = value.trim();
+  if (!/^[A-Za-z0-9._:-]{6,128}$/.test(sessionId)) return undefined;
+  return sessionId;
+}
+
+function parseMessage(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const message = value.trim();
+  if (!message || message.length > MAX_MESSAGE_CHARACTERS) return undefined;
+  return message;
+}
+
+function parseAnswers(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > TOTAL_QUESTIONS - 1) return undefined;
+  const answers = value.map((answer) => parseMessage(answer));
+  return answers.every(Boolean) ? (answers as string[]) : undefined;
+}
+
+function parseHistory(value: unknown): InterviewRecoveryMessage[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > TOTAL_QUESTIONS * 2) return undefined;
+  const history: InterviewRecoveryMessage[] = [];
+
+  for (const item of value) {
+    if (!isObject(item) || (item.role !== "agent" && item.role !== "user")) return undefined;
+    const content = parseMessage(item.content);
+    if (!content) return undefined;
+    const entry: InterviewRecoveryMessage = { role: item.role, content };
+    if (item.meta !== undefined) {
+      if (!isObject(item.meta)) return undefined;
+      const meta = item.meta;
+      if (
+        !Number.isInteger(meta.questionNumber) ||
+        !Number.isInteger(meta.day) ||
+        !dayByNumber.has(meta.day as number) ||
+        !isShortString(meta.topic, 200) ||
+        typeof meta.isFollowUp !== "boolean" ||
+        !Array.isArray(meta.daysCovered) ||
+        !meta.daysCovered.every((day) => Number.isInteger(day) && dayByNumber.has(day as number))
+      ) {
+        return undefined;
+      }
+      entry.meta = {
+        questionNumber: meta.questionNumber as number,
+        day: meta.day as number,
+        topic: meta.topic,
+        isFollowUp: meta.isFollowUp,
+        daysCovered: meta.daysCovered as number[],
+      };
     }
-    if (picked.length === 6) break;
+    history.push(entry);
   }
 
-  for (const mission of passed) {
-    if (picked.length === 6) break;
-    const day = dayByNumber.get(mission.day);
-    if (day && !picked.some((item) => item.day === day.day)) picked.push(day);
+  return history;
+}
+
+function clientAddress(request: Request) {
+  return (
+    request.headers.get("x-nf-client-connection-ip") ||
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown"
+  );
+}
+
+function consumeRateLimit(key: string, limit: number, windowMs: number) {
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfter: 0 };
+  }
+  if (bucket.count >= limit) {
+    return { allowed: false, retryAfter: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)) };
+  }
+  bucket.count += 1;
+  return { allowed: true, retryAfter: 0 };
+}
+
+function checkRateLimits(request: Request, sessionId: string) {
+  const ipResult = consumeRateLimit(`ip:${clientAddress(request)}`, 90, 60_000);
+  if (!ipResult.allowed) return ipResult;
+  return consumeRateLimit(`session:${sessionId}`, 30, 30 * 60_000);
+}
+
+function blobsAvailable() {
+  return Boolean(process.env.NETLIFY || process.env.NETLIFY_BLOBS_CONTEXT);
+}
+
+async function loadPersistentSession(sessionId: string) {
+  if (!blobsAvailable()) return undefined;
+  try {
+    const store = getStore({ name: SESSION_STORE_NAME, consistency: "strong" });
+    const value = (await store.get(sessionId, { type: "json", consistency: "strong" })) as InterviewSession | null;
+    if (!value || !validateCandidate(value.candidate) || !Array.isArray(value.plan) || !Array.isArray(value.records)) {
+      return undefined;
+    }
+    if (value.expiresAt <= Date.now()) {
+      await store.delete(sessionId);
+      return undefined;
+    }
+    return value;
+  } catch (error) {
+    console.warn(`[interview] Durable session read unavailable (${error instanceof Error ? error.name : "UnknownError"}).`);
+    return undefined;
+  }
+}
+
+async function loadSession(sessionId: string) {
+  const memory = sessions.get(sessionId);
+  if (memory?.expiresAt && memory.expiresAt > Date.now()) return memory;
+  if (memory) sessions.delete(sessionId);
+  const durable = await loadPersistentSession(sessionId);
+  if (durable) sessions.set(sessionId, durable);
+  return durable;
+}
+
+async function saveSession(sessionId: string, session: InterviewSession) {
+  session.updatedAt = Date.now();
+  session.expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(sessionId, session);
+  if (!blobsAvailable()) return;
+  try {
+    const store = getStore({ name: SESSION_STORE_NAME, consistency: "strong" });
+    await store.setJSON(sessionId, session, { metadata: { expiresAt: session.expiresAt } });
+  } catch (error) {
+    console.warn(`[interview] Durable session write unavailable (${error instanceof Error ? error.name : "UnknownError"}).`);
+  }
+}
+
+async function deleteSession(sessionId: string) {
+  sessions.delete(sessionId);
+  if (!blobsAvailable()) return;
+  try {
+    const store = getStore({ name: SESSION_STORE_NAME, consistency: "strong" });
+    await store.delete(sessionId);
+  } catch (error) {
+    console.warn(`[interview] Durable session cleanup unavailable (${error instanceof Error ? error.name : "UnknownError"}).`);
+  }
+}
+
+function recoverSession(body: RequestBody, candidate: Candidate | undefined) {
+  if (!candidate) return undefined;
+  const history = parseHistory(body.history);
+  if (body.history !== undefined && !history) return undefined;
+  if (history?.length) return rebuildSessionFromHistory(candidate, history);
+  const answers = parseAnswers(body.answers);
+  if (body.answers !== undefined && !answers) return undefined;
+  if (answers) return rebuildSessionFromAnswers(candidate, answers);
+  return undefined;
+}
+
+async function startInterview(sessionId: string, candidate: Candidate) {
+  let session: InterviewSession;
+  try {
+    session = createSession(candidate);
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "Candidate cannot support a valid interview.", 422);
   }
 
-  for (const fallback of days) {
-    if (picked.length === 6) break;
-    if (!picked.some((item) => item.day === fallback.day)) picked.push(fallback);
-  }
-  return picked;
-}
+  const opening = await generateSemanticOpening(session).catch((error) => {
+    console.warn(`[interview] Invalid semantic opening; using fallback (${error instanceof Error ? error.name : "UnknownError"}).`);
+    return undefined;
+  });
+  session.lastQuestion = opening ?? deterministicQuestion(session, session.plan[0], 1);
+  await saveSession(sessionId, session);
 
-function conceptFromAnswer(answer: string) {
-  const ignore = new Set(["about","after","because","could","from","have","into","that","their","then","there","these","they","this","using","what","when","where","which","with","would","your"]);
-  const words = answer.toLowerCase().match(/[a-z][a-z0-9-]{4,}/g) ?? [];
-  return words.find((word) => !ignore.has(word)) ?? "that approach";
-}
-
-function questionFor(session: Session, previousAnswer = "") {
-  const n = session.questionNumber;
-  const sequence = [0,0,1,2,3,1,4,5];
-  const day = session.plan[sequence[Math.min(n - 1, sequence.length - 1)]] ?? session.plan[0];
-  const objective = day.objectives[(n - 1) % Math.max(day.objectives.length,1)] ?? `explain ${day.title}`;
-  const topic = moduleForDay(day.day);
-  const concept = conceptFromAnswer(previousAnswer);
-  const attempts = session.candidate.missions.find((mission) => mission.day === day.day)?.attempts ?? 1;
-  const followUp = n === 2 || n === 4 || n === 6;
-
-  let question: string;
-  if (n === 1) {
-    question = `Welcome, ${session.candidate.member.name}. We’ll focus on systems you completed during the cohort. Let’s begin with Day ${day.day}: ${day.title}. Walk me through how you would ${objective.toLowerCase()}, and explain the most important engineering decision you would make.`;
-  } else if (n === 2) {
-    question = `You mentioned “${concept}.” Suppose that choice works in a prototype but fails under production traffic. What would you inspect first, and what evidence would change your design?`;
-  } else if (n === 3) {
-    question = `Let’s move to Day ${day.day}: ${day.title}. Design a small but production-conscious implementation. Describe the components, data flow, and one trade-off you would deliberately accept.`;
-  } else if (n === 4) {
-    question = `In your answer, “${concept}” stood out. Compare that approach with one credible alternative. When would the alternative be the better engineering choice?`;
-  } else if (n === 5) {
-    question = `Consider Day ${day.day}: ${day.title}. A teammate says the system works locally but behaves inconsistently after deployment. Give me a structured debugging plan, including what you would log or measure.`;
-  } else if (n === 6) {
-    question = `You connected the problem to “${concept}.” Now make the failure more subtle: the output looks plausible but is wrong. How would you detect, evaluate, and prevent that class of failure?`;
-  } else if (n === 7) {
-    question = `For Day ${day.day}: ${day.title}, identify the highest-risk production failure. What guardrail would you add, and how would you verify that it actually works?`;
-  } else {
-    question = `Final question. Using what you built on Day ${day.day}: ${day.title}, explain one decision you would defend in a real interview, one decision you would now change, and the evidence behind both.`;
-  }
-
-  if (attempts >= 4 && !followUp && n > 1) question += " This was a higher-attempt mission in your learning history, so be precise about the reasoning.";
-  return { question, day, topic, followUp };
-}
-
-function evaluate(answer: string, day: CurriculumDay): Evaluation {
-  const normalized = answer.toLowerCase();
-  const vocabulary = [...day.tools, ...day.objectives.flatMap((objective) => objective.split(/\s+/))]
-    .map((word) => word.toLowerCase().replace(/[^a-z0-9-]/g,""))
-    .filter((word) => word.length > 4);
-  const keywords = new Set(vocabulary.filter((word) => normalized.includes(word))).size;
-  const length = answer.trim().split(/\s+/).filter(Boolean).length;
-  if (length >= 45 && keywords >= 2) return { length, keywords, strength: `Connected ${day.title} to concrete implementation details and trade-offs.` };
-  if (length >= 28) return { length, keywords, strength: `Explained the ${day.title} approach with a clear, structured line of reasoning.` };
-  return { length, keywords, gap: `Answers about ${day.title} need more implementation detail, failure modes, and measurable evidence.` };
-}
-
-function feedbackFor(session: Session): Feedback {
-  const strengths = session.evaluations.flatMap((item) => item.strength ? [item.strength] : []);
-  const gaps = session.evaluations.flatMap((item) => item.gap ? [item.gap] : []);
-  const unique = (items: string[]) => [...new Set(items)].slice(0,3);
-  const avgLength = session.evaluations.reduce((sum,item) => sum + item.length,0) / Math.max(session.evaluations.length,1);
-  const covered = session.daysCovered.map((day) => `Day ${day}`).join(", ");
-  const strengthList = unique(strengths);
-  const gapList = unique(gaps);
-  if (strengthList.length < 2) strengthList.push("Maintained the conversation across multiple technical domains without losing the core question.");
-  if (gapList.length < 2) gapList.push("Make trade-offs explicit: name the rejected option, the constraint, and the evidence for your choice.");
-
-  return {
-    summary: `${session.candidate.member.name} completed an 8-question personalized interview covering ${covered}. The responses averaged ${Math.round(avgLength)} words and showed ${strengths.length >= gaps.length ? "solid working knowledge with room to sharpen production reasoning" : "foundational understanding that now needs deeper system-level explanation"}.`,
-    strengths: unique(strengthList),
-    gaps: unique(gapList),
-    next: [
-      `Revisit ${session.plan[0].title} and practise a two-minute answer using architecture, trade-off, failure mode, and metric.`,
-      `Create one production incident scenario for ${session.plan[3]?.title ?? session.plan[1].title} and explain the debugging sequence out loud.`,
-      "Repeat the interview after writing concise STAR-style engineering stories for two cohort projects.",
-    ],
+  const response: InterviewApiResponse = {
+    reply: session.lastQuestion,
+    done: false,
+    meta: {
+      questionNumber: 1,
+      day: session.currentDay,
+      topic: moduleForDay(session.currentDay),
+      isFollowUp: false,
+      daysCovered: session.daysCovered,
+    },
   };
+  return jsonResponse(response);
 }
 
-function badRequest(reply: string, status = 400) {
-  return NextResponse.json({ reply, done:false }, { status });
+async function continueInterview(sessionId: string, session: InterviewSession, message: string) {
+  const answeredDay = dayByNumber.get(session.currentDay);
+  if (!answeredDay) return jsonError("The active interview references an invalid curriculum day.", 409);
+
+  const semantic = await generateSemanticTurn(session, message).catch((error) => {
+    console.warn(`[interview] Invalid semantic turn; using fallback (${error instanceof Error ? error.name : "UnknownError"}).`);
+    return undefined;
+  });
+  const assessment = semantic?.assessment ?? deterministicAssessment(message, answeredDay);
+  session.records.push({
+    question: session.lastQuestion,
+    answer: message,
+    day: answeredDay.day,
+    topic: moduleForDay(answeredDay.day),
+    assessment,
+  });
+
+  if (session.questionNumber >= TOTAL_QUESTIONS) {
+    const feedback = semantic?.feedback ?? deterministicFeedback(session);
+    const evaluation = summarizeEvaluation(session.records);
+    await deleteSession(sessionId);
+    const response: InterviewApiResponse = {
+      reply: "Interview completed. Your evidence-based feedback is ready.",
+      done: true,
+      feedback,
+      evaluation,
+    };
+    return jsonResponse(response);
+  }
+
+  const nextNumber = session.questionNumber + 1;
+  const semanticDay = semantic?.nextQuestion?.day;
+  const nextDay = semanticDay ? sanitizeNextDay(session, semanticDay) : chooseFallbackNextDay(session);
+  const nextQuestion = semantic?.nextQuestion?.text ?? deterministicQuestion(session, nextDay, nextNumber, message);
+  const mode = semantic?.nextQuestion?.mode;
+
+  session.questionNumber = nextNumber;
+  session.currentDay = nextDay.day;
+  session.lastQuestion = nextQuestion;
+  if (!session.daysCovered.includes(nextDay.day)) session.daysCovered.push(nextDay.day);
+  await saveSession(sessionId, session);
+
+  const response: InterviewApiResponse = {
+    reply: nextQuestion,
+    done: false,
+    meta: {
+      questionNumber: nextNumber,
+      day: nextDay.day,
+      topic: moduleForDay(nextDay.day),
+      isFollowUp: nextDay.day === answeredDay.day || mode === "follow_up" || mode === "clarification" || mode === "challenge",
+      daysCovered: session.daysCovered,
+    },
+  };
+  return jsonResponse(response);
 }
 
 export async function POST(request: Request) {
-  let body: { sessionId?: string; candidate?: Candidate; message?: string };
-  try { body = await request.json(); } catch { return badRequest("Request body must be valid JSON."); }
-  if (!body.sessionId?.trim()) return badRequest("sessionId is required.");
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) return jsonError("Content-Type must be application/json.", 415);
 
-  if (body.candidate) {
-    if (!body.candidate.member?.id || !Array.isArray(body.candidate.missions)) return badRequest("candidate does not match the required candidate schema.");
-    const plan = buildPlan(body.candidate);
-    const session: Session = { candidate:body.candidate, plan, questionNumber:1, daysCovered:[], evaluations:[], lastQuestion:"" };
-    const next = questionFor(session);
-    session.daysCovered = [next.day.day];
-    session.lastQuestion = next.question;
-    sessions.set(body.sessionId, session);
-    const response: InterviewApiResponse = { reply:next.question, done:false, meta:{ questionNumber:1, day:next.day.day, topic:next.topic, isFollowUp:false, daysCovered:session.daysCovered } };
-    return NextResponse.json(response);
+  let rawBody: string;
+  try {
+    rawBody = await request.text();
+  } catch {
+    return jsonError("Request body could not be read.");
+  }
+  if (new TextEncoder().encode(rawBody).byteLength > MAX_BODY_BYTES) {
+    return jsonError("Request body is too large.", 413);
   }
 
-  const session = sessions.get(body.sessionId);
-  if (!session) return badRequest("Interview session not found. Start again with the candidate object.", 404);
-  if (!body.message?.trim()) return badRequest("message is required for an active interview.");
+  let body: RequestBody;
+  try {
+    body = JSON.parse(rawBody) as RequestBody;
+  } catch {
+    return jsonError("Request body must be valid JSON.");
+  }
+  if (!isObject(body)) return jsonError("Request body must be a JSON object.");
 
-  const sequence = [0,0,1,2,3,1,4,5];
-  const answeredDay = session.plan[sequence[Math.min(session.questionNumber - 1, sequence.length - 1)]] ?? session.plan[0];
-  session.evaluations.push(evaluate(body.message, answeredDay));
-
-  if (session.questionNumber >= 8) {
-    const feedback = feedbackFor(session);
-    sessions.delete(body.sessionId);
-    return NextResponse.json({ reply:"Interview completed. Your feedback is ready.", done:true, feedback } satisfies InterviewApiResponse);
+  const sessionId = parseSessionId(body.sessionId);
+  if (!sessionId) return jsonError("A valid sessionId between 6 and 128 characters is required.");
+  const rateLimit = checkRateLimits(request, sessionId);
+  if (!rateLimit.allowed) {
+    return jsonError("Too many interview requests. Please wait briefly and retry.", 429, {
+      "Retry-After": String(rateLimit.retryAfter),
+    });
   }
 
-  session.questionNumber += 1;
-  const next = questionFor(session, body.message);
-  if (!session.daysCovered.includes(next.day.day)) session.daysCovered.push(next.day.day);
-  session.lastQuestion = next.question;
-  return NextResponse.json({ reply:next.question, done:false, meta:{ questionNumber:session.questionNumber, day:next.day.day, topic:next.topic, isFollowUp:next.followUp, daysCovered:session.daysCovered } } satisfies InterviewApiResponse);
+  const candidate = body.candidate === undefined ? undefined : validateCandidate(body.candidate) ? body.candidate : undefined;
+  if (body.candidate !== undefined && !candidate) return jsonError("candidate does not match the required candidate schema.");
+
+  const message = parseMessage(body.message);
+  if (body.message !== undefined && !message) {
+    return jsonError(`message must contain between 1 and ${MAX_MESSAGE_CHARACTERS} characters.`);
+  }
+
+  if (candidate && !message) return startInterview(sessionId, candidate);
+  if (!message) return jsonError("message is required for an active interview.");
+  if (processing.has(sessionId)) return jsonError("This interview turn is already being processed.", 409);
+
+  processing.add(sessionId);
+  try {
+    const session = (await loadSession(sessionId)) ?? recoverSession(body, candidate);
+    if (!session) {
+      return jsonError("Interview session not found. Restart or include the candidate and recovery history.", 404);
+    }
+    return await continueInterview(sessionId, session, message);
+  } finally {
+    processing.delete(sessionId);
+  }
 }

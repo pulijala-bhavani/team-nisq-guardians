@@ -27,10 +27,10 @@ A learner who has completed part or all of the ABTalks AI cohort and wants to pr
 | FR-01 | Conduct a conversational technical interview | Chat-style interview room at `/interview` |
 | FR-02 | Ask at least eight questions | Session completes only after the eighth answer |
 | FR-03 | Cover at least four curriculum days | Question planner selects six distinct completed days when available |
-| FR-04 | Generate follow-up questions | Questions 2, 4, and 6 incorporate a concept from the previous answer |
-| FR-05 | Maintain context | Server session state is addressed by the supplied `sessionId` |
-| FR-06 | Personalize the interview | Planner uses completed missions, attempt counts, and candidate signals |
-| FR-07 | Produce actionable feedback | Final response contains `summary`, `strengths`, `gaps`, and `next` |
+| FR-04 | Generate follow-up questions | The semantic interviewer selects follow-up, clarification, challenge, new-topic, or synthesis mode from answer evidence |
+| FR-05 | Maintain context | `sessionId` addresses strongly consistent Netlify session state, with memory caching and validated browser recovery |
+| FR-06 | Personalize the interview | Planner uses completed missions, attempt counts, candidate signals, role, and prior-answer performance |
+| FR-07 | Produce actionable feedback | Final response contains `summary`, `strengths`, `gaps`, and `next`, plus additive five-dimension evaluation metadata |
 | FR-08 | Expose the required endpoint | `POST /api/interview` |
 
 ## Experience requirements
@@ -40,6 +40,7 @@ A learner who has completed part or all of the ABTalks AI cohort and wants to pr
 - The current topic, question progress, and covered days remain visible.
 - Candidate answers support multiple lines and keyboard submission.
 - The report separates demonstrated strengths, gaps, and next actions.
+- The report exposes five post-interview evaluation dimensions while keeping live scores hidden.
 - Light and dark themes must both remain readable and accessible.
 - Motion must be reduced when the operating system requests reduced motion.
 

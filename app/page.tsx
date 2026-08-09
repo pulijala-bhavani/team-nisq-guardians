@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { SiteNav } from "@/components/site-nav";
 
 const proofPoints = [
@@ -159,7 +160,7 @@ export default function Home() {
       </section>
 
       <footer className="site-footer section-shell">
-        <div className="footer-brand"><img className="footer-wordmark-img" src="/abtalks-wordmark.png" alt="AB Talks" width="90" height="24" /><p>AI Interview Agent</p></div>
+        <div className="footer-brand"><Image className="footer-wordmark-img" src="/abtalks-wordmark.png" alt="AB Talks" width={90} height={24} /><p>AI Interview Agent</p></div>
         <p>Built for the 31-day Enterprise AI Engineering cohort.</p>
         <div><a href="#hero-title">Back to top ↑</a></div>
       </footer>

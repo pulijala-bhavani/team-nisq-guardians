@@ -2,7 +2,10 @@
 
 A professional, curriculum-aware technical interview experience for the ABTalks 31-day Enterprise AI Engineering cohort.
 
-The agent selects questions from a candidate's completed missions, adapts follow-up questions to previous answers, maintains session context, covers multiple curriculum days, and produces structured actionable feedback.
+- Live application: [abtalks-interview-agent-ng.netlify.app](https://abtalks-interview-agent-ng.netlify.app/)
+- Source repository: [team-nisq-guardians](https://github.com/pulijala-bhavani/team-nisq-guardians)
+
+The agent selects questions from a candidate's completed missions, uses Gemini to understand and challenge each answer, maintains session context, covers multiple curriculum days, and produces evidence-grounded actionable feedback. A deterministic controller enforces the interview contract and provides a complete fallback if the model is unavailable.
 
 ## Core capabilities
 
@@ -10,9 +13,12 @@ The agent selects questions from a candidate's completed missions, adapts follow
 - Questions grounded in the 31-day `curriculum.json`
 - Minimum of eight questions per completed interview
 - Coverage of at least four curriculum days
-- Follow-up questions based on previous answers
+- Semantic answer evaluation and answer-dependent follow-ups through Gemini
+- Deterministic coverage, validation, and fallback authority
 - Session-scoped context through `sessionId`
+- Durable Netlify Blobs session storage with browser-assisted recovery
 - Structured feedback with `summary`, `strengths`, `gaps`, and `next`
+- Grounded readiness scoring across five evaluation dimensions
 - Candidate selection, live interview room, and feedback report
 - Light cloud-glass theme and a distinct cinematic dark theme
 - Responsive layouts and reduced-motion support
@@ -33,11 +39,13 @@ The agent selects questions from a candidate's completed missions, adapts follow
 - Next.js 16 App Router
 - React 19
 - TypeScript
+- Gemini 2.5 Flash through server-side structured JSON requests
+- Netlify Blobs for strongly consistent deployed session storage
 - Custom responsive CSS and CSS-based 3D animation
 - Browser `localStorage` for device-local interview/report continuity
-- Server-side session map for the included self-contained MVP interview engine
+- Hybrid session continuity: durable store, memory cache, and client-assisted reconstruction
 
-No authentication, production user database, voice interaction, or external LLM key is required.
+No authentication, persistent user accounts, or voice interaction is required. Without a Gemini key, the deterministic fallback still provides a complete working interview.
 
 ## Project structure
 
@@ -61,6 +69,8 @@ data/
   technical-spec.md        Provided API specification
 docs/                      Product, architecture, API, design, and QA documents
 lib/types.ts               Shared TypeScript contracts
+lib/interview-engine.ts    Coverage controller, fallback engine, and recovery logic
+lib/gemini-interviewer.ts  Structured semantic generation and evaluation adapter
 public/                    ABTalks wordmark asset
 ```
 
@@ -79,7 +89,15 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
-Live demo: [https://abtalks-interview-agent-ng.netlify.app/](https://abtalks-interview-agent-ng.netlify.app/)
+
+### Enable semantic AI locally
+
+1. Create an API key in [Google AI Studio](https://aistudio.google.com/app/apikey).
+2. Copy `.env.example` to `.env.local`.
+3. Set `GEMINI_API_KEY` in `.env.local`.
+4. Restart `npm run dev`.
+
+The key is read only by the server route. Never prefix it with `NEXT_PUBLIC_` or commit `.env.local`.
 
 ## Validation
 
@@ -96,7 +114,7 @@ Start a session:
 ```bash
 curl -X POST http://localhost:3000/api/interview \
   -H "Content-Type: application/json" \
-  -d '{"sessionId":"demo-123","candidate":{"member":{"id":"CAND-001","name":"Sarah Johnson","jobRole":"Senior Data Engineer","yearsExperience":9,"education":"MS Computer Science","status":"COMPLETED"},"missions":[],"signals":{"commitDays":28,"missionsCompleted":30,"missionsFirstTry":20}}}'
+  -d '{"sessionId":"demo-123","candidate":{"member":{"id":"CAND-001","name":"Sarah Johnson","jobRole":"Senior Data Engineer","yearsExperience":9,"education":"MS Computer Science","status":"COMPLETED"},"missions":[{"day":7,"title":"Embeddings Explained","passed":true,"attempts":1},{"day":12,"title":"Prompt Engineering Fundamentals","passed":true,"attempts":4},{"day":22,"title":"Multi-Agent Orchestration","passed":true,"attempts":2},{"day":28,"title":"Docker & Kubernetes Deployment","passed":true,"attempts":3}],"signals":{"commitDays":28,"missionsCompleted":30,"missionsFirstTry":20}}}'
 ```
 
 Continue the same session:
@@ -125,11 +143,11 @@ See [docs/03-API-CONTRACT.md](docs/03-API-CONTRACT.md) for the complete contract
 3. Netlify will read `netlify.toml` and use the Next.js adapter.
 4. Deploy.
 
-No environment variables are required for the included MVP.
+For the full semantic interviewer, configure `GEMINI_API_KEY` in the deployment dashboard and redeploy. `GEMINI_MODEL`, `GEMINI_TIMEOUT_MS`, and `INTERVIEW_LLM_ENABLED` are optional. Netlify Blobs is provisioned automatically for the deployed site. If the model is unavailable, the deterministic fallback preserves the full interview flow.
 
 ## Data and privacy
 
-All supplied curriculum and candidate data are synthetic and intended only for the hackathon. The project does not implement authentication, persistent user accounts, or long-term conversation history.
+All supplied curriculum and candidate data are synthetic and intended only for the hackathon. The project does not implement authentication, persistent user accounts, or cross-device report history. Active Netlify sessions expire after two hours; completed reports remain device-local.
 
 ## Documentation
 

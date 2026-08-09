@@ -6,9 +6,7 @@
 POST /api/interview
 ```
 
-Authentication is not required.
-
-All requests and responses use JSON.
+Authentication is not required. Requests and responses use JSON.
 
 ## Start an interview
 
@@ -26,7 +24,12 @@ All requests and responses use JSON.
       "education": "MS Computer Science",
       "status": "COMPLETED"
     },
-    "missions": [],
+    "missions": [
+      { "day": 7, "title": "Embeddings Explained", "passed": true, "attempts": 1 },
+      { "day": 12, "title": "Prompt Engineering Fundamentals", "passed": true, "attempts": 4 },
+      { "day": 22, "title": "Multi-Agent Orchestration", "passed": true, "attempts": 2 },
+      { "day": 28, "title": "Docker & Kubernetes Deployment", "passed": true, "attempts": 3 }
+    ],
     "signals": {
       "commitDays": 28,
       "missionsCompleted": 30,
@@ -36,7 +39,7 @@ All requests and responses use JSON.
 }
 ```
 
-The production UI sends the complete candidate object from `data/candidates.json`.
+The complete candidate must match the supplied schema and contain at least four explicit passed missions mapped to real curriculum days.
 
 ### Response
 
@@ -58,7 +61,7 @@ The production UI sends the complete candidate object from `data/candidates.json
 
 ## Continue an interview
 
-### Request
+### Minimum organiser request
 
 ```json
 {
@@ -67,11 +70,38 @@ The production UI sends the complete candidate object from `data/candidates.json
 }
 ```
 
+### Bundled browser request
+
+```json
+{
+  "sessionId": "abc-123",
+  "message": "I would begin by defining a fixed evaluation set...",
+  "candidate": { "...": "complete supplied candidate" },
+  "answers": ["Earlier answer"],
+  "history": [
+    {
+      "role": "agent",
+      "content": "Earlier question",
+      "meta": {
+        "questionNumber": 1,
+        "day": 12,
+        "topic": "LLM Core, Prompting & Fine-Tuning",
+        "isFollowUp": false,
+        "daysCovered": [12]
+      }
+    },
+    { "role": "user", "content": "Earlier answer" }
+  ]
+}
+```
+
+`candidate`, `answers`, and `history` are optional additive recovery fields. The API validates them before use. They allow reconstruction when no durable or in-memory session is available.
+
 ### Response
 
 ```json
 {
-  "reply": "You mentioned evaluation. Suppose that choice works in a prototype...",
+  "reply": "You proposed a fixed evaluation set. How would you detect whether it has stopped representing production traffic?",
   "done": false,
   "meta": {
     "questionNumber": 2,
@@ -89,36 +119,57 @@ After the eighth answer:
 
 ```json
 {
-  "reply": "Interview completed. Your feedback is ready.",
+  "reply": "Interview completed. Your evidence-based feedback is ready.",
   "done": true,
   "feedback": {
     "summary": "...",
     "strengths": ["..."],
     "gaps": ["..."],
     "next": ["..."]
+  },
+  "evaluation": {
+    "overallScore": 82,
+    "dimensions": {
+      "technicalAccuracy": 84,
+      "technicalSpecificity": 80,
+      "reasoning": 85,
+      "communication": 81,
+      "productionAwareness": 79
+    },
+    "engine": "gemini"
   }
 }
 ```
 
-## Error responses
+`feedback` preserves the exact required structure. `evaluation` is optional additive metadata used to render a grounded readiness score instead of a fabricated UI value.
 
-| Status | Cause |
-| --- | --- |
-| `400` | Invalid JSON, missing `sessionId`, invalid candidate schema, or missing message |
-| `404` | The supplied `sessionId` does not identify an active interview |
+## Validation and errors
 
-Example:
+All errors preserve JSON shape:
 
 ```json
 {
-  "reply": "sessionId is required.",
+  "reply": "A valid sessionId between 6 and 128 characters is required.",
   "done": false
 }
 ```
 
+| Status | Cause |
+| --- | --- |
+| `400` | Invalid JSON, malformed recovery data, candidate-schema failure, or invalid message |
+| `404` | No active session and insufficient recovery context |
+| `409` | Duplicate concurrent turn or invalid active state |
+| `413` | Request body exceeds 120 KB |
+| `415` | Content type is not `application/json` |
+| `422` | Candidate has fewer than four eligible completed curriculum days |
+| `429` | Per-IP or per-session request limit exceeded |
+
 ## State rules
 
-- The client must reuse the same `sessionId` for every turn.
-- A new candidate request initializes or replaces the session associated with that ID.
-- A completed session is removed after final feedback is returned.
-- The included MVP uses server memory for active session state.
+- Reuse the same `sessionId` for every turn.
+- A new candidate request initializes or replaces that session ID.
+- Netlify deployments persist active sessions in a strongly consistent site-scoped store.
+- The server also maintains an in-memory cache and accepts optional browser recovery context.
+- Completed sessions are removed after feedback is returned.
+- Active sessions expire after two hours.
+- Starting a new interview creates a new UUID and clears stale visible feedback in the current browser.

@@ -8,6 +8,13 @@ import type { InterviewApiResponse, StoredSession } from "@/lib/types";
 function initials(name:string){return name.split(/\s+/).map((part)=>part[0]).join("").slice(0,2).toUpperCase()}
 function formatTime(seconds:number){return `${String(Math.floor(seconds/60)).padStart(2,"0")}:${String(seconds%60).padStart(2,"0")}`}
 function makeId(){return globalThis.crypto?.randomUUID?.()??`ab-${Date.now()}-${Math.random().toString(36).slice(2)}`}
+async function readApiResponse(response:Response){
+  if(!response.headers.get("content-type")?.includes("application/json")){
+    await response.text();
+    throw new Error("The interview service returned a temporary invalid response. Your answer is preserved—please retry.");
+  }
+  return response.json() as Promise<InterviewApiResponse>;
+}
 
 export function InterviewRoom(){
   const router=useRouter();
@@ -30,13 +37,15 @@ export function InterviewRoom(){
     const optimistic={...session,messages:[...session.messages,userMessage]};
     setSession(optimistic);setInput("");setSending(true);setError("");
     try{
-      const response=await fetch("/api/interview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.sessionId,message:answer})});
-      const data=await response.json() as InterviewApiResponse;
+      const previousAnswers=session.messages.filter((message)=>message.role==="user").map((message)=>message.content);
+      const history=session.messages.map((message)=>({role:message.role,content:message.content,meta:message.meta}));
+      const response=await fetch("/api/interview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId:session.sessionId,message:answer,candidate:session.candidate,answers:previousAnswers,history})});
+      const data=await readApiResponse(response);
       if(!response.ok)throw new Error(data.reply||"The interviewer could not continue.");
       if(data.done&&data.feedback){
         const finished={...optimistic,messages:[...optimistic.messages,{id:makeId(),role:"agent" as const,content:data.reply}],questionCount:8};
         localStorage.setItem("abtalks-interview-session",JSON.stringify(finished));
-        const report={feedback:data.feedback,candidate:session.candidate,sessionId:session.sessionId,completedAt:Date.now(),duration:elapsed,daysCovered:session.daysCovered};
+        const report={feedback:data.feedback,evaluation:data.evaluation,candidate:session.candidate,sessionId:session.sessionId,completedAt:Date.now(),duration:elapsed,daysCovered:session.daysCovered};
         localStorage.setItem("abtalks-final-report",JSON.stringify(report));
         const history=JSON.parse(localStorage.getItem("abtalks-report-history")||"[]") as unknown[];
         localStorage.setItem("abtalks-report-history",JSON.stringify([report,...history].slice(0,10)));

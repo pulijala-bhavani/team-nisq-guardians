@@ -1,46 +1,65 @@
 # Security and Limitations
 
-## Current security characteristics
+## Implemented controls
 
-- No authentication or user identity is collected.
-- No external model key is required.
-- No candidate data are sent to an external AI provider.
-- The API validates JSON, `sessionId`, candidate shape, and message presence.
-- The UI renders interview content through React text nodes rather than raw HTML.
-- Active sessions are removed after feedback is returned.
+- No authentication or real user identity is collected.
+- Gemini credentials are read only from server-side environment variables.
+- Request bodies are limited to 120 KB.
+- Candidate fields, missions, curriculum days, session IDs, messages, answers, and recovery history are validated.
+- Candidate plans accept only explicit passed missions mapped to supplied curriculum days.
+- Messages are limited to 8,000 characters.
+- Per-IP and per-session rate limits reduce accidental or basic automated abuse.
+- Duplicate simultaneous turns for the same session are rejected.
+- Model output must match a strict JSON schema and then passes application validation.
+- Candidate answers are treated as untrusted quoted data in the model prompt.
+- Gemini cannot override question-count, coverage, eligibility, or completion policy.
+- Model timeouts, quota errors, invalid JSON, and invalid semantic decisions fall back to the deterministic engine.
+- React renders interview content as text rather than raw HTML.
+- Completed server sessions are deleted immediately.
+- Active sessions expire after two hours.
 
 ## Data handling
 
 The supplied curriculum and candidate profiles are synthetic.
 
-The browser stores the active transcript and report only on the current device using `localStorage`. Users can clear this information by clearing site storage or starting a new session.
+When `GEMINI_API_KEY` is configured, selected synthetic candidate context and interview answers are sent to the Gemini API for semantic evaluation and question generation. The application does not send secrets or browser storage contents unrelated to the active interview.
 
-## MVP limitations
+The browser stores:
 
-### In-memory server sessions
+- the active transcript;
+- the final report;
+- up to ten device-local report records; and
+- the theme preference.
 
-The included engine maintains active sessions in server memory. This satisfies the session-based API contract for the self-contained hackathon deployment and local execution.
+This information is isolated per browser origin. Starting a new interview clears the visible previous final report. Users can remove all browser records by clearing site data.
 
-For multi-instance production deployment, replace the in-memory map with Redis, Postgres, or another shared session store so every server instance can retrieve the same session.
+## Session continuity
 
-### Deterministic interview engine
+Netlify deployments store active sessions in Netlify Blobs using strongly consistent reads. A memory cache reduces latency. The bundled browser additionally sends validated recovery history so a missing session can be reconstructed without losing the current answer.
 
-The included engine provides adaptive, answer-dependent follow-ups without requiring an external model key. It uses candidate history, curriculum objectives, answer vocabulary, and response depth.
+Netlify Blobs uses last-write-wins rather than distributed transactions. The UI prevents double submission, the route rejects overlapping turns within one function instance, and the session-specific rate limit reduces abuse. A high-scale production version should use a transactional store or distributed lock.
 
-A production version can introduce an LLM behind the same API contract while retaining deterministic validation and fallback questions.
+## Prompt-injection boundary
 
-### Local report history
+Candidate content is included as JSON-quoted evidence under explicit instructions that it cannot change the system policy. Model responses cannot directly perform actions. They are limited to a validated assessment and next-question or feedback schema. The deterministic controller independently verifies allowed days and completion state.
 
-Report history is device-local and not synchronized across browsers or devices. Long-term user history is intentionally out of scope.
+## Remaining proportional limitations
 
-## Recommended production controls
+- There are no persistent user accounts or cross-device report synchronization because both are explicitly out of scope.
+- In-memory rate limiting is instance-local; a production system should use a distributed limiter.
+- External callers using only the minimum contract depend on the durable Netlify session. On platforms without Netlify Blobs, the bundled recovery fields provide the strongest continuity.
+- Automated semantic evaluation can still be imperfect. The score should be treated as interview-preparation guidance, not a hiring decision.
+- Netlify Blobs is suitable for this hackathon workload but is not a replacement for a transactional production database.
 
-- Rate limiting by session and IP
-- Shared session persistence with expiry
-- Request-size limits
-- Structured logs without storing unnecessary personal data
-- Prompt and model version tracking
-- Schema validation for model output
-- Automated evaluation datasets
-- Abuse and prompt-injection testing
-- Monitoring for latency, failures, and session completion rate
+## Dependency audit note
+
+Next.js and its compiler dependencies are pinned to the current patched `16.3.0` release. The remaining npm audit finding is in `image-size`, a transitive dependency of the current `@netlify/blobs` package. No patched upstream release is available. This application does not expose image upload, image parsing, or any path that passes candidate-controlled image data to that package; the dependency is reached only through Netlify's storage library. Keep `@netlify/blobs` updated when Netlify publishes a patched transitive dependency.
+
+## Recommended production evolution
+
+- Add authenticated users only if future product scope requires accounts.
+- Replace instance-local rate limits and locks with distributed controls.
+- Add model-quality evaluations scored against expert-labelled interviews.
+- Add tracing for latency, fallback rate, completion rate, and schema failures without logging unnecessary answer content.
+- Add consent, retention controls, and provider-region review before processing real candidate data.
+- Add human review and score calibration before using feedback in consequential decisions.

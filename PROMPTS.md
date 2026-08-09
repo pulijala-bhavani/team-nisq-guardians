@@ -1,51 +1,45 @@
-ABTalks Interview Agent — Prompt Record
+# ABTalks Interview Agent — Prompt Record
 
-This file documents the structured AI-assisted workflow used to design, build, test, and present the ABTalks Interview Agent.
+This file documents the structured AI-assisted workflow used to design, build, test, and present the **ABTalks Interview Agent**.
 
 It has been cleaned for submission: conversational phrasing, abandoned architectures, unused providers, and speculative features have been removed.
 
-Important implementation disclosure
+## Important implementation disclosure
 
-The submitted MVP does not call an external LLM at runtime. Its interview behaviour is produced by a deterministic, curriculum-aware engine implemented in app/api/interview/route.ts.
+The submitted MVP does **not** call an external LLM at runtime. Its interview behaviour is produced by a deterministic, curriculum-aware engine implemented in `app/api/interview/route.ts`.
 
 The engine:
 
-reads the supplied curriculum and candidate data;
-
-prioritizes completed and higher-attempt missions;
-
-plans coverage across multiple curriculum days;
-
-extracts a meaningful concept from the previous answer for follow-ups;
-
-evaluates answer length and curriculum vocabulary;
-
-generates structured feedback after eight answers; and
-
-preserves the organiser's required POST /api/interview contract.
+- reads the supplied curriculum and candidate data;
+- prioritizes completed and higher-attempt missions;
+- plans coverage across multiple curriculum days;
+- extracts a meaningful concept from the previous answer for follow-ups;
+- evaluates answer length and curriculum vocabulary;
+- generates structured feedback after eight answers; and
+- preserves the organiser's required `POST /api/interview` contract.
 
 The prompts below were development instructions given to coding and presentation assistants. They are not hidden runtime prompts.
 
-Prompt structure used
+---
+
+## Prompt structure used
 
 The main prompts use six layers of context:
 
-Identity context — who the assistant should act as.
+1. **Identity context** — who the assistant should act as.
+2. **World context** — the product situation and constraints.
+3. **Task context** — the concrete outcome required.
+4. **Example context** — examples of acceptable and unacceptable outcomes.
+5. **Instruction context** — implementation and quality rules.
+6. **Data context** — authoritative files and contracts.
 
-World context — the product situation and constraints.
+Whenever a prompt creates documentation, the output must be a Markdown `.md` file.
 
-Task context — the concrete outcome required.
+---
 
-Example context — examples of acceptable and unacceptable outcomes.
+# 1. Source audit and requirements prompt
 
-Instruction context — implementation and quality rules.
-
-Data context — authoritative files and contracts.
-
-Whenever a prompt creates documentation, the output must be a Markdown .md file.
-
-1. Source audit and requirements prompt
-
+```text
 IDENTITY CONTEXT
 Act as a senior product analyst and technical-specification reviewer. Be precise, conservative, and traceable. Do not invent requirements.
 
@@ -89,9 +83,13 @@ DATA CONTEXT
 - data/candidates.json
 - data/technical-spec.md
 - Required endpoint: POST /api/interview
+```
 
-2. Architecture and implementation prompt
+---
 
+# 2. Architecture and implementation prompt
+
+```text
 IDENTITY CONTEXT
 Act as a senior full-stack TypeScript engineer and pragmatic AI systems architect. Optimize for correctness, explainability, deployment reliability, and hackathon delivery speed.
 
@@ -147,9 +145,13 @@ DATA CONTEXT
 - data/technical-spec.md
 - docs/01-PRODUCT-REQUIREMENTS.md
 - docs/03-API-CONTRACT.md
+```
 
-3. Deterministic interview-engine prompt
+---
 
+# 3. Deterministic interview-engine prompt
+
+```text
 IDENTITY CONTEXT
 Act as an interview-systems engineer. Design a controlled adaptive interviewer whose behaviour can be explained and tested.
 
@@ -204,9 +206,13 @@ DATA CONTEXT
 - Candidate member details, missions, attempts, passed status, and signals.
 - Curriculum day titles, objectives, tools, and module ranges.
 - Session fields: candidate, plan, questionNumber, daysCovered, evaluations, and lastQuestion.
+```
 
-4. Premium frontend and UI/UX redesign prompt
+---
 
+# 4. Premium frontend and UI/UX redesign prompt
+
+```text
 IDENTITY CONTEXT
 Act as an award-level product designer and senior frontend engineer specializing in premium AI SaaS interfaces, information hierarchy, accessibility, responsive design, and restrained motion.
 
@@ -266,9 +272,13 @@ DATA CONTEXT
 - Candidate and curriculum datasets.
 - ABTalks wordmark asset.
 - Required product behaviour from the technical specification.
+```
 
-5. Session isolation, reset, and recovery prompt
+---
 
+# 5. Session isolation, reset, and recovery prompt
+
+```text
 IDENTITY CONTEXT
 Act as a senior frontend-state and serverless reliability engineer.
 
@@ -319,9 +329,13 @@ DATA CONTEXT
 - active transcript
 - final feedback
 - theme preference
+```
 
-6. API error-handling prompt
+---
 
+# 6. API error-handling prompt
+
+```text
 IDENTITY CONTEXT
 Act as a TypeScript API integration engineer focused on resilient user-facing error handling.
 
@@ -357,9 +371,13 @@ DATA CONTEXT
 - HTTP status
 - Content-Type response header
 - Current typed answer and session state
+```
 
-7. Final QA and submission-audit prompt
+---
 
+# 7. Final QA and submission-audit prompt
+
+```text
 IDENTITY CONTEXT
 Act as a hackathon technical reviewer, QA engineer, accessibility auditor, and skeptical judge.
 
@@ -412,11 +430,15 @@ DATA CONTEXT
 - README.md
 - docs/
 - POST /api/interview
+```
 
-8. Presentation video prompt
+---
+
+# 8. Presentation video prompt
 
 This prompt was used only to prepare the project presentation. It is not part of the application runtime.
 
+```text
 Create a polished 3–4 minute hackathon product-presentation video for ABTalks Interview Agent by Team NISQ Guardians.
 
 Use a premium modern SaaS storytelling style that matches the supplied UI: light-blue glassmorphism, white space, subtle cloud-like gradients, elegant motion, crisp typography, and occasional deep-navy dark-mode transitions. Use the supplied product screenshots as the primary visuals and do not invent unrelated screens.
@@ -439,32 +461,31 @@ Mention the team once near the end:
 - Sannith Reddy — Testing and documentation
 
 Close with: "ABTalks Interview Agent — turn completed lessons into confident answers."
+```
 
-Presentation visual-style prompt
+## Presentation visual-style prompt
 
+```text
 Premium futuristic SaaS product film. Use a refined light-blue and white glassmorphism aesthetic with soft cloud-like gradients, floating translucent panels, clean navy typography, subtle luminous-blue accents, smooth elegant motion, and occasional deep-navy dark-mode transitions.
 
 Keep the result professional, minimal, and high-end. Avoid cartoonish visuals, excessive neon, busy compositions, fake analytics, and unrelated interface designs. Match the supplied ABTalks Interview Agent screenshots closely.
+```
 
-Final source-of-truth order
+---
+
+## Final source-of-truth order
 
 When any prompt conflicts with another source, use this priority:
 
-data/technical-spec.md
+1. `data/technical-spec.md`
+2. `data/curriculum.json`
+3. `data/candidates.json`
+4. Existing verified application behaviour
+5. Approved architecture and product documentation
+6. Development prompts in this file
 
-data/curriculum.json
+## Project references
 
-data/candidates.json
-
-Existing verified application behaviour
-
-Approved architecture and product documentation
-
-Development prompts in this file
-
-Project references
-
-Live application: https://abtalks-interview-agent-ng.netlify.app/
-
-Repository: https://github.com/pulijala-bhavani/team-nisq-guardians
+- Live application: https://abtalks-interview-agent-ng.netlify.app/
+- Repository: https://github.com/pulijala-bhavani/team-nisq-guardians
 
